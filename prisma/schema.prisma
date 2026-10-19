@@ -1,0 +1,230 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  email     String   @unique
+  password  String
+  role      UserRole   @default(USER)
+  isActive  Boolean    @default(true)
+  deletedAt DateTime?
+  sessionVersion Int  @default(0)
+  pin       String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payments   Payment[]
+  cartItems  Cart[]
+  posSales   PosSale[]
+}
+
+enum UserRole {
+  USER
+  CASHIER
+  ADMIN
+  SUPER_ADMIN
+}
+
+// One line in a customer's bag. Prices are looked up again at checkout.
+model Cart {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id])
+  productId String   @db.ObjectId
+  quantity  Int      @default(1)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("cart_items")
+}
+
+// Something the pharmacy sells. Stock is counted in selling units (a pack,
+// a bottle, a strip), the same unit the price is for.
+model Product {
+  id                   String    @id @default(auto()) @map("_id") @db.ObjectId
+  name                 String               // e.g. "Panadol Extra 500mg/65mg"
+  genericName          String?              // active ingredient, e.g. "Paracetamol + Caffeine"
+  category             String               // one of PRODUCT_CATEGORIES in app/lib/products.ts
+  description          String?
+  strength             String?              // "500 mg", "250 mg/5 ml"
+  dosageForm           String?              // Tablet, Syrup, Cream...
+  packSize             String?              // "Pack of 20 tablets"
+  manufacturer         String?
+  sku                  String?              // barcode or shelf code, searchable at the till
+  price                Float                // selling price per unit, KSh
+  costPrice            Float?               // what the pharmacy paid, for margins; never shown to customers
+  image                String?
+  requiresPrescription Boolean   @default(false)
+  stock                Int       @default(0)
+  reorderLevel         Int       @default(10)
+  batchNumber          String?
+  expiryDate           DateTime?
+  isActive             Boolean   @default(true) // false hides it from the shop and the till
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([category])
+  @@map("products")
+}
+
+// Every change to a product's stock, with who made it and why.
+model StockMovement {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  productId   String   @db.ObjectId
+  productName String
+  change      Int      // + received, - sold or written off
+  stockAfter  Int
+  reason      String   // SALE_POS | SALE_ONLINE | RESTOCK | ADJUSTMENT | EXPIRED | DAMAGED | RETURN
+  reference   String?  // sale number, order id, supplier invoice...
+  note        String?
+  userId      String?  @db.ObjectId
+  userName    String?
+  createdAt   DateTime @default(now())
+
+  @@index([productId, createdAt])
+  @@map("stock_movements")
+}
+
+model Payment {
+  id                  String        @id @default(auto()) @map("_id") @db.ObjectId
+  userId              String        @db.ObjectId // Add userId field
+  user                User          @relation(fields: [userId], references: [id]) // Establish relation to User model
+  merchantRequestId   String
+  checkoutRequestId   String        @unique
+  phoneNumber         String
+  amount              Float
+  status              PaymentStatus @default(PENDING)
+  resultCode          Int?
+  resultDesc          String?
+  mpesaReceiptNumber  String?
+  transactionDate     String?
+  cartItems           Json?         // Store cart items
+  // Where a website order is in the kitchen/delivery process (null = new).
+  // NEW | PREPARING | OUT_FOR_DELIVERY | READY | DELIVERED | COLLECTED | CANCELLED
+  fulfilment          String?
+  fulfilmentLog       Json?         // [{ stage, at, by }]
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+
+// A prescription a customer sent in. A pharmacist reviews it, then the
+// medicines are dispensed and paid for at the till.
+model PrescriptionRequest {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId          String?  @db.ObjectId // set when the customer was signed in
+  patientName     String
+  phone           String
+  medicines       String?  // what the customer says they need
+  notes           String?
+  file            String?  // stored outside /public; served by /api/prescriptions/[id]/file
+  fileType        String?
+  deliveryMethod  String   @default("pickup") // "pickup" | "delivery"
+  deliveryAddress String?
+  source          String   @default("form")   // "form" | "whatsapp"
+  status          String   @default("pending") // see PRESCRIPTION_STATUSES in app/lib/prescriptions.ts
+  pharmacistNote  String?
+  reviewedBy      String?
+  reviewedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@map("prescription_requests")
+}
+
+model Promotion {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  message   String
+  active    Boolean  @default(true)
+  
+  // Day-based scheduling (0 = Sunday, 6 = Saturday)
+  daysOfWeek Int[]   @default([]) // e.g., [0,1,2,3,4,5,6] for all days, [1,3,5] for Mon/Wed/Fri
+  
+  // Optional: Date range for seasonal promotions
+  startDate  DateTime? // Optional start date
+  endDate    DateTime? // Optional end date
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@map("promotions")
+}
+
+model PosSale {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  saleNumber    String   @unique
+  cashierId     String   @db.ObjectId
+  cashier       User     @relation(fields: [cashierId], references: [id])
+  cashierName   String
+  items         Json     // Array of { id, name, category, price, quantity, subtotal }
+  subtotal      Float
+  discount      Float    @default(0)
+  total         Float
+  paymentMethod String   // "CASH" | "MPESA"
+  amountPaid    Float
+  changeDue     Float    @default(0)
+  mpesaCode     String?  // M-Pesa transaction code / receipt (e.g. QK84...)
+  customerName  String?
+  customerPhone String?
+  notes         String?
+  // Set when the ticket had prescription-only medicines: the prescription the cashier checked.
+  prescriptionRef       String?
+  prescriptionCheckedBy String?
+  status        String   @default("COMPLETED") // "COMPLETED", "VOIDED"
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("pos_sales")
+}
+
+// An M-Pesa prompt sent from the till. The ticket waits here until PayHero
+// confirms the payment; only then is it recorded as a PosSale.
+model PosMpesaRequest {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  reference    String?  // PayHero's reference for the STK push
+  cashierId    String   @db.ObjectId
+  cashierName  String
+  phone        String
+  amount       Float
+  sale         Json     // the priced ticket (PreparedSale)
+  status       String   @default("PENDING") // PENDING | COMPLETING | COMPLETED | FAILED
+  saleNumber   String?
+  mpesaReceipt String?
+  resultDesc   String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("pos_mpesa_requests")
+}
+
+model Expense {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  date           DateTime // The day the money was spent (midnight, Kenya time)
+  amount         Float
+  category       String   // One of EXPENSE_CATEGORIES in app/lib/expenses.ts
+  description    String
+  vendor         String?
+  paymentMethod  String   // "CASH" | "MPESA" | "BANK" | "OTHER"
+  reference      String?  // Receipt number or M-Pesa code
+  recordedById   String   @db.ObjectId
+  recordedByName String
+  createdAt      DateTime @default(now())
+
+  @@index([date])
+  @@map("expenses")
+}
